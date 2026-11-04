@@ -1,0 +1,5 @@
+reports/
+*.png
+__pycache__/
+test_data.json
+~$*
