@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from typing import Callable
 
 from docx import Document
 from docx.oxml import OxmlElement
@@ -11,6 +12,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 from docx.styles.style import ParagraphStyle
 from playwright.sync_api import sync_playwright, Page, expect
+
+import startup_founder as SF
 
 URL = "https://www.startupindia.gov.in/bhaskar/register"
 
@@ -21,6 +24,7 @@ DATA = {
     "email": "",
     "mobile": "",
     "password": "",
+    "mode": "signup",
 }
 DATA_FILE = Path(__file__).with_name("test_data.json")
 if DATA_FILE.exists():
@@ -51,6 +55,8 @@ LOC = {
     "mobile_otp_input": "input[name='mobileOtp']",
     "verify_email_btn": "button:has-text('Verfiy Email OTP')",
     "verify_mobile_btn": "button:has-text('Verify Mobile OTP')",
+    "login_username":   "input[name='username']",
+    "login_password":   "input[name='password']",
 }
 
 GREEN, RED, AMBER = RGBColor(0x1B, 0x7F, 0x3B), RGBColor(0xC6, 0x28, 0x28), RGBColor(0xB4, 0x53, 0x09)
@@ -67,6 +73,9 @@ class RunReport:
         self._base = None
         self._base_loaded = False
         self._lock_warned = False
+        self.persona = "Startup Founder / Entrepreneur (Individual)"
+        self.test_data: dict = {}
+        self.bhaskar_id = ""
 
     def step(self, page: Page, name: str, status: str = "PASS", note: str = "", message: bool = False) -> None:
         png = msg_text = msg_png = None
@@ -126,6 +135,12 @@ class RunReport:
         self._kv(doc, "Run", f"{self.started:%d-%b-%Y %H:%M:%S}  ->  {datetime.now():%H:%M:%S}")
         self._kv(doc, "URL", URL)
         self._kv(doc, "Test user", f"{DATA['first_name']} {DATA['last_name']}  /  {DATA['email']}  /  {DATA['mobile']}")
+        self._kv(doc, "Persona", f"{self.persona}  |  start: {'log in to existing account' if DATA['mode'] == 'login' else 'new sign-up'}")
+        if self.test_data:
+            d = self.test_data
+            self._kv(doc, "Generated data", f"Year of birth {d['year_of_birth']}, {d['gender']}, PIN {d['pin']}, "
+                                            f"PAN {d['pan']}, {d['startup_name']}")
+        self._kv(doc, "BHASKAR ID", self.bhaskar_id or "-", GREEN if self.bhaskar_id else None)
         if self.error:
             self._kv(doc, "Error", self.error, RED)
 
@@ -300,8 +315,98 @@ def generate_and_verify_otp(page: Page, report: RunReport) -> None:
     report.step(page, "Get your BHASKAR ID", note=f"Landed on {page.url}")
 
 
+def log_in(page: Page, report: RunReport) -> str:
+    page.goto(URL, wait_until="domcontentloaded")
+    page.get_by_role("button", name="Login", exact=True).first.click()
+    page.locator(LOC["login_username"]).wait_for(state="visible")
+    report.step(page, "Open login form")
+    page.locator(LOC["login_username"]).fill(DATA["email"])
+    page.locator(LOC["login_password"]).fill(DATA["password"])
+    page.get_by_role("button", name="Login", exact=True).last.click()
+    individual = page.get_by_role("heading", name=re.compile(r"^\s*Individual\s*$", re.I))
+    publish_btn = page.get_by_role("button", name=re.compile(r"^\s*Publish Your Profile", re.I))
+    stage, end = "", time.monotonic() + API_TIMEOUT_MS / 1000
+    while not stage and time.monotonic() < end:
+        if individual.first.is_visible():
+            stage = "persona"
+        elif "stepfour" in page.url and publish_btn.first.is_visible():
+            stage = "profile"
+        elif page.url.rstrip("/").endswith("/bhaskar/profile"):
+            bid = SF.bhaskar_id_from_page(page)
+            message = (f"This account has already finished registration (BHASKAR ID {bid or 'not read'}) and opens its "
+                       f"dashboard. Use a new email and mobile with mode \"signup\" in test_data.json.")
+            report.step(page, "Log in", "FAIL", message, message=True)
+            raise RuntimeError(message)
+        else:
+            page.wait_for_timeout(500)
+    if not stage:
+        message = f"Neither persona selection nor the profile form opened after login; now on {page.url}"
+        report.step(page, "Log in", "FAIL", message, message=True)
+        raise RuntimeError(message)
+    where = "persona selection" if stage == "persona" else "Complete Your Public Profile"
+    report.step(page, "Log in", note=f"Logged in as {DATA['email']}, landed on {where}", message=True)
+    return stage
+
+
+def flow_step(page: Page, report: RunReport, name: str, action, note: str | Callable[[], str] = "", message: bool = False):
+    try:
+        result = action()
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        report.step(page, name, "FAIL", reason, message=True)
+        raise RuntimeError(f"{name} failed - {reason}")
+    report.step(page, name, note=note() if callable(note) else note, message=message)
+    return result
+
+
+def register_persona(page: Page, report: RunReport, stage: str = "persona") -> None:
+    t = TIMEOUT_MS / 1000
+    data = SF.make_test_data(DATA["last_name"])
+    report.test_data = data
+    print(f"[DATA] Year of birth {data['year_of_birth']}, {data['gender']}, PIN {data['pin']}, PAN {data['pan']}, "
+          f"{data['startup_name']}")
+    if stage == "profile":
+        report.bhaskar_id = SF.bhaskar_id_from_page(page)
+        print(f"[INFO] Account already has BHASKAR ID {report.bhaskar_id or '(not read)'}; continuing with the profile")
+        complete_profile(page, report, data, t)
+        return
+    flow_step(page, report, "Choose Individual > Startup Founder / Entrepreneur", lambda: SF.choose_persona(page, t))
+    flow_step(page, report, "Fill basic form", lambda: SF.fill_basic_form(page, data, DATA["email"], t),
+              note=f"Year of birth {data['year_of_birth']}, {data['gender']}, India, PIN {data['pin']}, PAN {data['pan']}")
+    flow_step(page, report, "Preview and submit", lambda: SF.preview_and_submit(page, t))
+    flow_step(page, report, "Accept Terms & Conditions", lambda: SF.accept_terms(page, t))
+    try:
+        bid = SF.generate_bhaskar_id(page, t)
+    except Exception as e:
+        report.step(page, "Generate BHASKAR ID", "FAIL", f"{type(e).__name__}: {e}", message=True)
+        raise RuntimeError(f"Generate BHASKAR ID failed - {e}")
+    report.bhaskar_id = bid
+    report.step(page, "Generate BHASKAR ID", note=f"BHASKAR ID: {bid or 'not read from the page'}", message=True)
+    flow_step(page, report, "Open Complete your profile", lambda: SF.open_profile(page, t))
+    complete_profile(page, report, data, t)
+
+
+def complete_profile(page: Page, report: RunReport, data: dict, t: float) -> None:
+    empty: list = []
+    flow_step(page, report, "Fill public profile", lambda: empty.extend(SF.fill_profile(page, data, DATA["mobile"], print)),
+              note=lambda: f"Dropdowns without options: {', '.join(empty)}" if empty else "All fields filled")
+    try:
+        published, replies = SF.publish(page, t)
+    except Exception as e:
+        report.step(page, "Publish Your Profile", "FAIL", f"{type(e).__name__}: {e}", message=True)
+        raise RuntimeError(f"Publish Your Profile failed - {e}")
+    details = " | ".join(replies) if replies else "no server reply recorded"
+    if not published:
+        message = f"Page did not move on after Publish (still on {page.url.split('?')[0]}). Server: {details}"
+        report.step(page, "Publish Your Profile", "FAIL", message, message=True)
+        raise RuntimeError("Profile was not published")
+    report.step(page, "Publish Your Profile", note=f"Published. Server: {details}", message=True)
+
+
 def main() -> None:
     missing = [k for k, v in DATA.items() if not v]
+    if DATA["mode"] not in ("signup", "login"):
+        raise SystemExit('mode in test_data.json must be "signup" or "login"')
     if missing:
         raise SystemExit(f"Fill these values in test_data.json first: {', '.join(missing)}")
 
@@ -311,10 +416,15 @@ def main() -> None:
         page = browser.new_context().new_page()
         page.set_default_timeout(TIMEOUT_MS)
         try:
-            fill_registration_form(page, report)
-            generate_and_verify_otp(page, report)
+            stage = "persona"
+            if DATA["mode"] == "login":
+                stage = log_in(page, report)
+            else:
+                fill_registration_form(page, report)
+                generate_and_verify_otp(page, report)
+            register_persona(page, report, stage)
             report.result = "PASS"
-            input("Done. Press Enter to close the browser...")
+            print("[DONE] Profile published")
         except BaseException as e:
             report.result = "FAIL"
             report.error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
