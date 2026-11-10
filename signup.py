@@ -47,6 +47,10 @@ LOC = {
     "generate_otp_btn": "button:has-text('Generate OTP for Email & Mobile')",
     "email_otp":        "Email OTP",
     "get_id_btn":       "button:has-text('Get your BHASKAR ID')",
+    "email_otp_input":  "input[name='emailOtp']",
+    "mobile_otp_input": "input[name='mobileOtp']",
+    "verify_email_btn": "button:has-text('Verfiy Email OTP')",
+    "verify_mobile_btn": "button:has-text('Verify Mobile OTP')",
 }
 
 GREEN, RED, AMBER = RGBColor(0x1B, 0x7F, 0x3B), RGBColor(0xC6, 0x28, 0x28), RGBColor(0xB4, 0x53, 0x09)
@@ -214,15 +218,34 @@ def fill_registration_form(page: Page, report: RunReport) -> None:
     report.step(page, "Fill registration form")
 
 
+def auto_verify(page: Page, key: str, tried: dict) -> None:
+    box = page.locator(LOC[f"{key}_otp_input"])
+    button = page.locator(LOC[f"verify_{key}_btn"])
+    try:
+        if not (box.is_visible() and button.is_visible()):
+            return
+        value = box.input_value().strip()
+        if len(value) == 6 and value != tried[key] and button.is_enabled():
+            tried[key] = value
+            print(f"[AUTO] Clicking Verify for the {key} OTP")
+            button.click(timeout=5000)
+    except Exception as e:
+        print(f"[WARN] Could not click Verify for the {key} OTP: {type(e).__name__}")
+
+
 def wait_for_otps_in_browser(page: Page, report: RunReport) -> None:
-    print("[ACTION] In the browser, type the Email OTP and Mobile OTP and click both Verify buttons.")
+    print("[ACTION] In the browser, type the 6-digit Email OTP and Mobile OTP. Verify is clicked automatically.")
     done = {"email": False, "mobile": False}
+    tried = {"email": "", "mobile": ""}
     seen: set[str] = set()
     get_id = page.locator(LOC["get_id_btn"])
     deadline = time.monotonic() + OTP_WAIT_MS / 1000
     while not get_id.is_visible():
         if time.monotonic() > deadline:
             raise TimeoutError(f"OTPs were not verified in the browser within {OTP_WAIT_MS // 60000} minutes")
+        for key in ("email", "mobile"):
+            if not done[key]:
+                auto_verify(page, key, tried)
         texts = {" ".join(t.split()) for t in page.locator("[role='status']").all_inner_texts()}
         for text in texts - seen:
             low = text.lower()
