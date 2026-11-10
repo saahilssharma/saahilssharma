@@ -29,6 +29,7 @@ if DATA_FILE.exists():
 HEADLESS = False
 SLOW_MO_MS = 200
 TIMEOUT_MS = 30_000
+OTP_WAIT_MS = 600_000
 API_TIMEOUT_MS = 60_000
 REGISTER_API = "/sih/api/noauth/signup/bhaskar/register"
 REPORT_DIR = Path(__file__).with_name("reports")
@@ -44,10 +45,7 @@ LOC = {
     "password":         "#password",
     "confirm_password": "#confirmPassword",
     "generate_otp_btn": "button:has-text('Generate OTP for Email & Mobile')",
-    "mobile_otp":       "Mobile OTP",
     "email_otp":        "Email OTP",
-    "verify_email_btn": "button:has-text('Verfiy Email OTP')",
-    "verify_mobile_btn": "button:has-text('Verify Mobile OTP')",
     "get_id_btn":       "button:has-text('Get your BHASKAR ID')",
 }
 
@@ -216,6 +214,33 @@ def fill_registration_form(page: Page, report: RunReport) -> None:
     report.step(page, "Fill registration form")
 
 
+def wait_for_otps_in_browser(page: Page, report: RunReport) -> None:
+    print("[ACTION] In the browser, type the Email OTP and Mobile OTP and click both Verify buttons.")
+    done = {"email": False, "mobile": False}
+    seen: set[str] = set()
+    get_id = page.locator(LOC["get_id_btn"])
+    deadline = time.monotonic() + OTP_WAIT_MS / 1000
+    while not get_id.is_visible():
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"OTPs were not verified in the browser within {OTP_WAIT_MS // 60000} minutes")
+        texts = {" ".join(t.split()) for t in page.locator("[role='status']").all_inner_texts()}
+        for text in texts - seen:
+            low = text.lower()
+            if "email otp successfully verified" in low:
+                done["email"] = True
+                report.step(page, "Verify Email OTP", message=True)
+            elif "mobile otp successfully verified" in low:
+                done["mobile"] = True
+                report.step(page, "Verify Mobile OTP", message=True)
+            elif "invalid" in low or "please enter the otp" in low:
+                report.step(page, "OTP verification attempt", "FAIL", "Wrong or empty OTP entered, waiting for a retry", message=True)
+        seen = texts
+        page.wait_for_timeout(500)
+    for key, name in (("email", "Verify Email OTP"), ("mobile", "Verify Mobile OTP")):
+        if not done[key]:
+            report.step(page, name, note="Verified in the browser (success message was not captured)")
+
+
 def generate_and_verify_otp(page: Page, report: RunReport) -> None:
     with page.expect_response(lambda r: REGISTER_API in r.url, timeout=API_TIMEOUT_MS) as resp_info:
         page.locator(LOC["generate_otp_btn"]).click()
@@ -231,18 +256,10 @@ def generate_and_verify_otp(page: Page, report: RunReport) -> None:
         report.step(page, "Generate OTP for Email & Mobile", "FAIL", message, message=True)
         raise RuntimeError(message)
 
-    email_otp = page.get_by_role("textbox", name=LOC["email_otp"])
-    mobile_otp = page.get_by_role("textbox", name=LOC["mobile_otp"])
-    email_otp.wait_for(state="visible")
+    page.get_by_role("textbox", name=LOC["email_otp"]).wait_for(state="visible")
     report.step(page, "Generate OTP for Email & Mobile", note="Site accepted registration, OTPs sent", message=True)
 
-    email_otp.fill(input("Enter Email OTP: ").strip())
-    page.locator(LOC["verify_email_btn"]).click()
-    report.step(page, "Verify Email OTP", message=True)
-
-    mobile_otp.fill(input("Enter Mobile OTP: ").strip())
-    page.locator(LOC["verify_mobile_btn"]).click()
-    report.step(page, "Verify Mobile OTP", message=True)
+    wait_for_otps_in_browser(page, report)
 
     get_id = page.locator(LOC["get_id_btn"])
     expect(get_id).to_be_enabled()
