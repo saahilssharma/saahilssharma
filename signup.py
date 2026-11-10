@@ -61,15 +61,10 @@ class RunReport:
         self.result = "IN PROGRESS"
         self.error = ""
         self._t = time.monotonic()
-        self.target = REPORT_FILE
         self.shot_dir = SCREENSHOT_DIR / f"{self.started:%Y-%m-%d_%H%M%S}"
         self._base = None
-        if REPORT_FILE.exists():
-            try:
-                self._base = REPORT_FILE.read_bytes()
-            except PermissionError:
-                self.target = self._fallback_path()
-                print(f"[WARN] {REPORT_FILE.name} is open in Word, so this run is saved to {self.target.name}")
+        self._base_loaded = False
+        self._lock_warned = False
 
     def step(self, page: Page, name: str, status: str = "PASS", note: str = "", message: bool = False) -> None:
         png = msg_text = msg_png = None
@@ -90,12 +85,31 @@ class RunReport:
             print(f"        Site message: {msg_text}")
         try:
             self.save()
+        except PermissionError:
+            if not self._lock_warned:
+                print(f"[WARN] {REPORT_FILE.name} is open in Word. Steps are kept and will be saved into it once it is closed.")
+                self._lock_warned = True
         except Exception as e:
             print(f"[WARN] Could not save report after this step: {type(e).__name__}: {e}")
 
+    def save_final(self) -> Path:
+        while True:
+            try:
+                return self.save()
+            except PermissionError:
+                print(f"[WAIT] {REPORT_FILE.name} is open in Word. Close it, then press Enter to save this run into it.")
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    raise RuntimeError(f"Run not saved into {REPORT_FILE.name}; screenshots are in {self.shot_dir}")
+
     def save(self) -> Path:
         REPORT_DIR.mkdir(exist_ok=True)
-        if self._base is not None and self.target == REPORT_FILE:
+        if not self._base_loaded:
+            if REPORT_FILE.exists():
+                self._base = REPORT_FILE.read_bytes()
+            self._base_loaded = True
+        if self._base is not None:
             doc = Document(BytesIO(self._base))
             self._separator(doc)
         else:
@@ -140,15 +154,8 @@ class RunReport:
             if s["png"]:
                 doc.add_paragraph("Full page:").runs[0].italic = True
                 doc.add_picture(BytesIO(s["png"]), width=Inches(6.0))
-        try:
-            doc.save(str(self.target))
-        except PermissionError:
-            if self.target != REPORT_FILE:
-                raise
-            self.target = self._fallback_path()
-            print(f"[WARN] {REPORT_FILE.name} is open in Word, so this run is saved separately")
-            return self.save()
-        return self.target
+        doc.save(str(REPORT_FILE))
+        return REPORT_FILE
 
     def _store_pngs(self, n: int, name: str, status: str, png, msg_png) -> None:
         stem = f"{n:02d}_{re.sub(r'[^A-Za-z0-9]+', '_', name).strip('_')}_{status}"
@@ -160,9 +167,6 @@ class RunReport:
                 (self.shot_dir / f"{stem}_message.png").write_bytes(msg_png)
         except OSError as e:
             print(f"[WARN] Could not save screenshot files: {e}")
-
-    def _fallback_path(self) -> Path:
-        return REPORT_DIR / f"BHASKAR_PROD_Daily_Signup_{self.started:%Y-%m-%d_%H%M%S}.docx"
 
     @staticmethod
     def _separator(doc):
@@ -261,7 +265,6 @@ def main() -> None:
             fill_registration_form(page, report)
             generate_and_verify_otp(page, report)
             report.result = "PASS"
-            report.save()
             input("Done. Press Enter to close the browser...")
         except BaseException as e:
             report.result = "FAIL"
@@ -272,7 +275,7 @@ def main() -> None:
         finally:
             print(f"[SCREENSHOTS] {report.shot_dir}")
             try:
-                print(f"[REPORT] {report.save()}")
+                print(f"[REPORT] {report.save_final()}")
             except Exception as e:
                 print(f"[REPORT FAILED] {type(e).__name__}: {e}")
             try:
