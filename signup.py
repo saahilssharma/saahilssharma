@@ -49,16 +49,23 @@ LOC = {
     "get_id_btn":       "button:has-text('Get your BHASKAR ID')",
 }
 
-GREEN, RED = RGBColor(0x1B, 0x7F, 0x3B), RGBColor(0xC6, 0x28, 0x28)
+GREEN, RED, AMBER = RGBColor(0x1B, 0x7F, 0x3B), RGBColor(0xC6, 0x28, 0x28), RGBColor(0xB4, 0x53, 0x09)
 
 
 class RunReport:
     def __init__(self):
         self.started = datetime.now()
         self.steps = []
-        self.result = "PASS"
+        self.result = "IN PROGRESS"
         self.error = ""
         self._t = time.monotonic()
+        self.target = REPORT_FILE
+        self._base = None
+        if REPORT_FILE.exists():
+            try:
+                self._base = REPORT_FILE.read_bytes()
+            except PermissionError:
+                self.target = self._fallback_path()
 
     def step(self, page: Page, name: str, status: str = "PASS", note: str = "", message: bool = False) -> None:
         png = msg_text = msg_png = None
@@ -76,11 +83,15 @@ class RunReport:
         print(f"[{status}] {name}" + (f" - {note}" if note else ""))
         if msg_text:
             print(f"        Site message: {msg_text}")
+        try:
+            self.save()
+        except Exception as e:
+            print(f"[WARN] Could not save report after this step: {type(e).__name__}: {e}")
 
     def save(self) -> Path:
         REPORT_DIR.mkdir(exist_ok=True)
-        if REPORT_FILE.exists():
-            doc = Document(str(REPORT_FILE))
+        if self._base is not None and self.target == REPORT_FILE:
+            doc = Document(BytesIO(self._base))
             self._separator(doc)
         else:
             doc = Document()
@@ -90,7 +101,7 @@ class RunReport:
             normal.font.size = Pt(10)
             doc.add_heading("BHASKAR Production - Daily Signup", 0)
         doc.add_heading(f"Run {self.started:%d-%b-%Y %H:%M:%S} - {self.result}", 1)
-        self._kv(doc, "Result", self.result, GREEN if self.result == "PASS" else RED)
+        self._kv(doc, "Result", self.result, {"PASS": GREEN, "FAIL": RED}.get(self.result, AMBER))
         self._kv(doc, "Run", f"{self.started:%d-%b-%Y %H:%M:%S}  ->  {datetime.now():%H:%M:%S}")
         self._kv(doc, "URL", URL)
         self._kv(doc, "Test user", f"{DATA['first_name']} {DATA['last_name']}  /  {DATA['email']}  /  {DATA['mobile']}")
@@ -125,13 +136,17 @@ class RunReport:
                 doc.add_paragraph("Full page:").runs[0].italic = True
                 doc.add_picture(BytesIO(s["png"]), width=Inches(6.0))
         try:
-            doc.save(str(REPORT_FILE))
-            return REPORT_FILE
+            doc.save(str(self.target))
         except PermissionError:
-            fallback = REPORT_DIR / f"BHASKAR_PROD_Daily_Signup_{self.started:%Y-%m-%d_%H%M%S}.docx"
-            doc.save(str(fallback))
-            print(f"[WARN] {REPORT_FILE.name} is open in Word, so this run was saved separately")
-            return fallback
+            if self.target != REPORT_FILE:
+                raise
+            self.target = self._fallback_path()
+            print(f"[WARN] {REPORT_FILE.name} is open in Word, so this run is saved separately")
+            return self.save()
+        return self.target
+
+    def _fallback_path(self) -> Path:
+        return REPORT_DIR / f"BHASKAR_PROD_Daily_Signup_{self.started:%Y-%m-%d_%H%M%S}.docx"
 
     @staticmethod
     def _separator(doc):
@@ -229,6 +244,8 @@ def main() -> None:
         try:
             fill_registration_form(page, report)
             generate_and_verify_otp(page, report)
+            report.result = "PASS"
+            report.save()
             input("Done. Press Enter to close the browser...")
         except BaseException as e:
             report.result = "FAIL"
