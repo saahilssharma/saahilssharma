@@ -240,8 +240,9 @@ def wait_for_otps_in_browser(page: Page, report: RunReport) -> None:
     seen: set[str] = set()
     get_id = page.locator(LOC["get_id_btn"])
     deadline = time.monotonic() + OTP_WAIT_MS / 1000
-    while not get_id.is_visible():
-        if time.monotonic() > deadline:
+    while True:
+        finished = get_id.is_visible()
+        if not finished and time.monotonic() > deadline:
             raise TimeoutError(f"OTPs were not verified in the browser within {OTP_WAIT_MS // 60000} minutes")
         for key in ("email", "mobile"):
             if not done[key]:
@@ -258,10 +259,12 @@ def wait_for_otps_in_browser(page: Page, report: RunReport) -> None:
             elif "invalid" in low or "please enter the otp" in low:
                 report.step(page, "OTP verification attempt", "FAIL", "Wrong or empty OTP entered, waiting for a retry", message=True)
         seen = texts
+        if finished:
+            break
         page.wait_for_timeout(500)
     for key, name in (("email", "Verify Email OTP"), ("mobile", "Verify Mobile OTP")):
         if not done[key]:
-            report.step(page, name, note="Verified in the browser (success message was not captured)")
+            report.step(page, name, note="Verified in the browser", message=True)
 
 
 def generate_and_verify_otp(page: Page, report: RunReport) -> None:
@@ -287,7 +290,13 @@ def generate_and_verify_otp(page: Page, report: RunReport) -> None:
     get_id = page.locator(LOC["get_id_btn"])
     expect(get_id).to_be_enabled()
     get_id.click()
-    page.wait_for_load_state("networkidle")
+    try:
+        page.wait_for_url("**/register/stepone**", timeout=API_TIMEOUT_MS)
+        page.wait_for_load_state("networkidle")
+    except Exception:
+        message = f"Did not reach the next registration page; still on {page.url}"
+        report.step(page, "Get your BHASKAR ID", "FAIL", message, message=True)
+        raise RuntimeError(message)
     report.step(page, "Get your BHASKAR ID", note=f"Landed on {page.url}")
 
 
