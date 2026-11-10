@@ -119,6 +119,9 @@ def react_pick(page: Page, label_rx: str, want=None, count: int = 1):
         inp.scroll_into_view_if_needed()
         inp.click()
         page.wait_for_timeout(500)
+        if want:
+            page.keyboard.type(str(want))
+            page.wait_for_timeout(500)
         opts = page.get_by_role("option")
         names = [opts.nth(i).inner_text().strip() for i in range(min(opts.count(), 60))]
         names = [n for n in names if n and n not in picked]
