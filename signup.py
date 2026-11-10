@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from datetime import datetime
 from io import BytesIO
@@ -32,6 +33,7 @@ API_TIMEOUT_MS = 60_000
 REGISTER_API = "/sih/api/noauth/signup/bhaskar/register"
 REPORT_DIR = Path(__file__).with_name("reports")
 REPORT_FILE = REPORT_DIR / "BHASKAR_PROD_Daily_Signup_Report.docx"
+SCREENSHOT_DIR = REPORT_DIR / "screenshots"
 
 LOC = {
     "first_name":       "#firstName",
@@ -60,12 +62,14 @@ class RunReport:
         self.error = ""
         self._t = time.monotonic()
         self.target = REPORT_FILE
+        self.shot_dir = SCREENSHOT_DIR / f"{self.started:%Y-%m-%d_%H%M%S}"
         self._base = None
         if REPORT_FILE.exists():
             try:
                 self._base = REPORT_FILE.read_bytes()
             except PermissionError:
                 self.target = self._fallback_path()
+                print(f"[WARN] {REPORT_FILE.name} is open in Word, so this run is saved to {self.target.name}")
 
     def step(self, page: Page, name: str, status: str = "PASS", note: str = "", message: bool = False) -> None:
         png = msg_text = msg_png = None
@@ -76,6 +80,7 @@ class RunReport:
                 png = page.screenshot(full_page=True)
             except Exception:
                 pass
+        self._store_pngs(len(self.steps) + 1, name, status, png, msg_png)
         now = time.monotonic()
         self.steps.append({"name": name, "status": status, "note": note, "png": png, "secs": now - self._t,
                            "msg_text": msg_text, "msg_png": msg_png, "msg_expected": message})
@@ -144,6 +149,17 @@ class RunReport:
             print(f"[WARN] {REPORT_FILE.name} is open in Word, so this run is saved separately")
             return self.save()
         return self.target
+
+    def _store_pngs(self, n: int, name: str, status: str, png, msg_png) -> None:
+        stem = f"{n:02d}_{re.sub(r'[^A-Za-z0-9]+', '_', name).strip('_')}_{status}"
+        try:
+            self.shot_dir.mkdir(parents=True, exist_ok=True)
+            if png:
+                (self.shot_dir / f"{stem}.png").write_bytes(png)
+            if msg_png:
+                (self.shot_dir / f"{stem}_message.png").write_bytes(msg_png)
+        except OSError as e:
+            print(f"[WARN] Could not save screenshot files: {e}")
 
     def _fallback_path(self) -> Path:
         return REPORT_DIR / f"BHASKAR_PROD_Daily_Signup_{self.started:%Y-%m-%d_%H%M%S}.docx"
@@ -254,6 +270,7 @@ def main() -> None:
                 report.step(page, "Failure point", "FAIL", report.error, message=True)
             raise
         finally:
+            print(f"[SCREENSHOTS] {report.shot_dir}")
             try:
                 print(f"[REPORT] {report.save()}")
             except Exception as e:
