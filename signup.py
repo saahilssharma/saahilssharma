@@ -59,6 +59,9 @@ LOC = {
     "login_password":   "input[name='password']",
 }
 
+STAGES = ["Register", "Select entity type", "Select persona", "Basic details", "T&C",
+          "BHASKAR ID generated", "Complete your profile"]
+
 GREEN, RED, AMBER = RGBColor(0x1B, 0x7F, 0x3B), RGBColor(0xC6, 0x28, 0x28), RGBColor(0xB4, 0x53, 0x09)
 
 
@@ -76,6 +79,11 @@ class RunReport:
         self.persona = "Startup Founder / Entrepreneur (Individual)"
         self.test_data: dict = {}
         self.bhaskar_id = ""
+        self.stage = 1
+
+    def set_stage(self, name: str) -> None:
+        self.stage = STAGES.index(name) + 1
+        print(f"=== Stage {self.stage}: {name}")
 
     def step(self, page: Page, name: str, status: str = "PASS", note: str = "", message: bool = False) -> None:
         png = msg_text = msg_png = None
@@ -86,9 +94,9 @@ class RunReport:
                 png = page.screenshot(full_page=True)
             except Exception:
                 pass
-        self._store_pngs(len(self.steps) + 1, name, status, png, msg_png)
+        self._store_pngs(len(self.steps) + 1, f"S{self.stage}_{name}", status, png, msg_png)
         now = time.monotonic()
-        self.steps.append({"name": name, "status": status, "note": note, "png": png, "secs": now - self._t,
+        self.steps.append({"stage": self.stage, "name": name, "status": status, "note": note, "png": png, "secs": now - self._t,
                            "msg_text": msg_text, "msg_png": msg_png, "msg_expected": message})
         self._t = now
         print(f"[{status}] {name}" + (f" - {note}" if note else ""))
@@ -144,17 +152,24 @@ class RunReport:
         if self.error:
             self._kv(doc, "Error", self.error, RED)
 
-        table = doc.add_table(rows=1, cols=3)
+        table = doc.add_table(rows=1, cols=4)
         table.style = "Light Grid Accent 1"
-        for cell, head in zip(table.rows[0].cells, ("Step", "Status", "Duration")):
+        for cell, head in zip(table.rows[0].cells, ("Stage", "Step", "Status", "Duration")):
             cell.text = head
         for s in self.steps:
             row = table.add_row().cells
-            row[0].text, row[1].text, row[2].text = s["name"], s["status"], f"{s['secs']:.1f} s"
-            row[1].paragraphs[0].runs[0].font.color.rgb = GREEN if s["status"] == "PASS" else RED
+            row[0].text = f"{s['stage']}. {STAGES[s['stage'] - 1]}"
+            row[1].text, row[2].text, row[3].text = s["name"], s["status"], f"{s['secs']:.1f} s"
+            row[2].paragraphs[0].runs[0].font.color.rgb = GREEN if s["status"] == "PASS" else RED
 
+        current = 0
         for i, s in enumerate(self.steps, 1):
-            doc.add_heading(f"Step {i}: {s['name']} - {s['status']}", 2)
+            if s["stage"] != current:
+                current = s["stage"]
+                stage_steps = [x for x in self.steps if x["stage"] == current]
+                stage_status = "FAIL" if any(x["status"] != "PASS" for x in stage_steps) else "PASS"
+                doc.add_heading(f"Stage {current}: {STAGES[current - 1]} - {stage_status}", 2)
+            doc.add_heading(f"Step {i}: {s['name']} - {s['status']}", 3)
             if s["note"]:
                 doc.add_paragraph(s["note"])
             colour = GREEN if s["status"] == "PASS" else RED
@@ -219,6 +234,7 @@ def capture_message(page: Page, timeout_ms: int = 5000):
 
 
 def fill_registration_form(page: Page, report: RunReport) -> None:
+    report.set_stage("Register")
     page.goto(URL, wait_until="domcontentloaded")
     page.locator(LOC["first_name"]).wait_for(state="visible")
     report.step(page, "Open registration page")
@@ -316,6 +332,7 @@ def generate_and_verify_otp(page: Page, report: RunReport) -> None:
 
 
 def log_in(page: Page, report: RunReport) -> str:
+    report.set_stage("Register")
     page.goto(URL, wait_until="domcontentloaded")
     page.get_by_role("button", name="Login", exact=True).first.click()
     page.locator(LOC["login_username"]).wait_for(state="visible")
@@ -366,15 +383,22 @@ def register_persona(page: Page, report: RunReport, stage: str = "persona") -> N
     print(f"[DATA] Year of birth {data['year_of_birth']}, {data['gender']}, PIN {data['pin']}, PAN {data['pan']}, "
           f"{data['startup_name']}")
     if stage == "profile":
+        report.set_stage("Complete your profile")
         report.bhaskar_id = SF.bhaskar_id_from_page(page)
         print(f"[INFO] Account already has BHASKAR ID {report.bhaskar_id or '(not read)'}; continuing with the profile")
         complete_profile(page, report, data, t)
         return
-    flow_step(page, report, "Choose Individual > Startup Founder / Entrepreneur", lambda: SF.choose_persona(page, t))
+    report.set_stage("Select entity type")
+    flow_step(page, report, "Choose Individual", lambda: SF.choose_entity(page, t))
+    report.set_stage("Select persona")
+    flow_step(page, report, "Choose Startup Founder / Entrepreneur", lambda: SF.choose_persona(page, t))
+    report.set_stage("Basic details")
     flow_step(page, report, "Fill basic form", lambda: SF.fill_basic_form(page, data, DATA["email"], t),
               note=f"Year of birth {data['year_of_birth']}, {data['gender']}, India, PIN {data['pin']}, PAN {data['pan']}")
     flow_step(page, report, "Preview and submit", lambda: SF.preview_and_submit(page, t))
+    report.set_stage("T&C")
     flow_step(page, report, "Accept Terms & Conditions", lambda: SF.accept_terms(page, t))
+    report.set_stage("BHASKAR ID generated")
     try:
         bid = SF.generate_bhaskar_id(page, t)
     except Exception as e:
@@ -382,6 +406,7 @@ def register_persona(page: Page, report: RunReport, stage: str = "persona") -> N
         raise RuntimeError(f"Generate BHASKAR ID failed - {e}")
     report.bhaskar_id = bid
     report.step(page, "Generate BHASKAR ID", note=f"BHASKAR ID: {bid or 'not read from the page'}", message=True)
+    report.set_stage("Complete your profile")
     flow_step(page, report, "Open Complete your profile", lambda: SF.open_profile(page, t))
     complete_profile(page, report, data, t)
 

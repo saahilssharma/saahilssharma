@@ -178,25 +178,28 @@ def pick_year(page: Page, box_name: str, year: str, max_pages: int = 12) -> None
     raise FlowError(f"year {year} not reachable in the year picker")
 
 
-def choose_persona(page: Page, timeout_s: float) -> None:
+def persona_card(page: Page):
+    return visible(page.get_by_text(re.compile(r"^\s*Startup\s*Founder", re.I)), 10) or visible(page.get_by_text(PERSONA_CARD_TEXT))
+
+
+def choose_entity(page: Page, timeout_s: float) -> None:
     head = wait_visible(page, lambda: page.get_by_role("heading", name=re.compile(r"^\s*Individual\s*$", re.I)), timeout_s)
     if head is None:
-        raise FlowError("'Individual' card not shown")
-    card_rx = re.compile(r"^\s*Startup\s*Founder", re.I)
-
-    def find_card():
-        return visible(page.get_by_text(card_rx), 10) or visible(page.get_by_text(PERSONA_CARD_TEXT))
-
-    card = wait_visible(page, lambda: page.get_by_text(card_rx), 3)
+        raise FlowError("'Individual' entity type not shown")
     for _ in range(3):
-        if card is not None:
-            break
+        if persona_card(page) is not None:
+            return
         head.click()
         page.wait_for_timeout(1500)
-        card = find_card()
+    if persona_card(page) is None:
+        raise FlowError("persona cards did not open after choosing 'Individual'")
+
+
+def choose_persona(page: Page, timeout_s: float) -> None:
+    card = wait_visible(page, lambda: page.get_by_text(re.compile(r"^\s*Startup\s*Founder", re.I)), timeout_s) or persona_card(page)
     if card is None:
         shown = [t.strip() for t in page.locator("h1, h2, h3, h4, h5, h6, p, span").all_inner_texts() if t.strip()][:40]
-        raise FlowError(f"'Startup Founder' card not found after choosing Individual. Texts on page: {shown}")
+        raise FlowError(f"'Startup Founder' card not found. Texts on page: {shown}")
     card.scroll_into_view_if_needed()
     card.click(force=True)
     page.wait_for_timeout(800)
