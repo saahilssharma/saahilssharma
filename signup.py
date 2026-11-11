@@ -4,20 +4,22 @@ import time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, TypedDict, TypeVar, cast
 
 from docx import Document
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
+from docx.document import Document as DocxDocument
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
 from docx.shared import Inches, Pt, RGBColor
+from docx.text.paragraph import Paragraph
 from docx.styles.style import ParagraphStyle
 from playwright.sync_api import sync_playwright, Page, expect
 
-import startup_founder as SF
+import personas as SF
 
 URL = "https://www.startupindia.gov.in/bhaskar/register"
 
-DATA = {
+DATA: dict[str, str] = {
     "first_name": "",
     "last_name": "",
     "nationality": "Indian",
@@ -25,8 +27,10 @@ DATA = {
     "mobile": "",
     "password": "",
     "mode": "signup",
+    "persona": "rotate",
 }
 DATA_FILE = Path(__file__).with_name("test_data.json")
+PERSONA_STATE = Path(__file__).with_name("last_persona.txt")
 if DATA_FILE.exists():
     DATA.update(json.loads(DATA_FILE.read_text(encoding="utf-8")))
 
@@ -65,19 +69,34 @@ STAGES = ["Register", "Select entity type", "Select persona", "Basic details", "
 GREEN, RED, AMBER = RGBColor(0x1B, 0x7F, 0x3B), RGBColor(0xC6, 0x28, 0x28), RGBColor(0xB4, 0x53, 0x09)
 
 
+class Step(TypedDict):
+    stage: int
+    name: str
+    status: str
+    note: str
+    png: bytes | None
+    secs: float
+    msg_text: str | None
+    msg_png: bytes | None
+    msg_expected: bool
+
+
+T = TypeVar("T")
+
+
 class RunReport:
-    def __init__(self):
+    def __init__(self) -> None:
         self.started = datetime.now()
-        self.steps = []
+        self.steps: list[Step] = []
         self.result = "IN PROGRESS"
         self.error = ""
         self._t = time.monotonic()
         self.shot_dir = SCREENSHOT_DIR / f"{self.started:%Y-%m-%d_%H%M%S}"
-        self._base = None
+        self._base: bytes | None = None
         self._base_loaded = False
         self._lock_warned = False
         self.persona = "Startup Founder / Entrepreneur (Individual)"
-        self.test_data: dict = {}
+        self.test_data: dict[str, str] = {}
         self.bhaskar_id = ""
         self.stage = 1
 
@@ -86,7 +105,9 @@ class RunReport:
         print(f"=== Stage {self.stage}: {name}")
 
     def step(self, page: Page, name: str, status: str = "PASS", note: str = "", message: bool = False) -> None:
-        png = msg_text = msg_png = None
+        png: bytes | None = None
+        msg_text: str | None = None
+        msg_png: bytes | None = None
         if not page.is_closed():
             if message:
                 msg_text, msg_png = capture_message(page)
@@ -147,7 +168,7 @@ class RunReport:
         if self.test_data:
             d = self.test_data
             self._kv(doc, "Generated data", f"Year of birth {d['year_of_birth']}, {d['gender']}, PIN {d['pin']}, "
-                                            f"PAN {d['pan']}, {d['startup_name']}")
+                                            f"PAN {d['pan']}, {d['org_name']}")
         self._kv(doc, "BHASKAR ID", self.bhaskar_id or "-", GREEN if self.bhaskar_id else None)
         if self.error:
             self._kv(doc, "Error", self.error, RED)
@@ -189,7 +210,7 @@ class RunReport:
         doc.save(str(REPORT_FILE))
         return REPORT_FILE
 
-    def _store_pngs(self, n: int, name: str, status: str, png, msg_png) -> None:
+    def _store_pngs(self, n: int, name: str, status: str, png: bytes | None, msg_png: bytes | None) -> None:
         stem = f"{n:02d}_{re.sub(r'[^A-Za-z0-9]+', '_', name).strip('_')}_{status}"
         try:
             self.shot_dir.mkdir(parents=True, exist_ok=True)
@@ -201,19 +222,16 @@ class RunReport:
             print(f"[WARN] Could not save screenshot files: {e}")
 
     @staticmethod
-    def _separator(doc):
-        p = doc.add_paragraph()
+    def _separator(doc: DocxDocument) -> None:
+        p: Paragraph = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(18)
         p.paragraph_format.space_after = Pt(18)
-        border = OxmlElement("w:pBdr")
-        bottom = OxmlElement("w:bottom")
-        for k, v in (("w:val", "double"), ("w:sz", "12"), ("w:space", "1"), ("w:color", "404040")):
-            bottom.set(qn(k), v)
-        border.append(bottom)
-        p._p.get_or_add_pPr().append(border)
+        border = parse_xml(f'<w:pBdr {nsdecls("w")}><w:bottom w:val="double" w:sz="12" w:space="1" w:color="404040"/></w:pBdr>')
+        element: Any = p.paragraph_format.element
+        element.get_or_add_pPr().append(border)
 
     @staticmethod
-    def _kv(doc, key, value, colour=None):
+    def _kv(doc: DocxDocument, key: str, value: str, colour: RGBColor | None = None) -> None:
         p = doc.add_paragraph()
         p.paragraph_format.space_after = Pt(0)
         p.add_run(f"{key}: ").bold = True
@@ -222,7 +240,7 @@ class RunReport:
             r.bold, r.font.color.rgb = True, colour
 
 
-def capture_message(page: Page, timeout_ms: int = 5000):
+def capture_message(page: Page, timeout_ms: int = 5000) -> tuple[str | None, bytes | None]:
     toast = page.locator("[role='status']").first
     try:
         toast.wait_for(state="visible", timeout=timeout_ms)
@@ -249,7 +267,7 @@ def fill_registration_form(page: Page, report: RunReport) -> None:
     report.step(page, "Fill registration form")
 
 
-def auto_verify(page: Page, key: str, tried: dict) -> None:
+def auto_verify(page: Page, key: str, tried: dict[str, str]) -> None:
     box = page.locator(LOC[f"{key}_otp_input"])
     button = page.locator(LOC[f"verify_{key}_btn"])
     try:
@@ -302,11 +320,14 @@ def generate_and_verify_otp(page: Page, report: RunReport) -> None:
     with page.expect_response(lambda r: REGISTER_API in r.url, timeout=API_TIMEOUT_MS) as resp_info:
         page.locator(LOC["generate_otp_btn"]).click()
 
-    result = resp_info.value.json()
+    result: dict[str, Any] = resp_info.value.json()
     if not result.get("status"):
-        details = result.get("data")
-        items = details.values() if isinstance(details, dict) else details if isinstance(details, list) else []
-        fields = [f"{d.get('field')}: {d.get('message')}" for d in items if isinstance(d, dict)]
+        details: Any = result.get("data")
+        if isinstance(details, dict):
+            details = list(cast(dict[str, Any], details).values())
+        items = cast(list[Any], details) if isinstance(details, list) else []
+        rows = cast(list[dict[str, Any]], [d for d in items if isinstance(d, dict)])
+        fields = [f"{d.get('field')}: {d.get('message')}" for d in rows]
         message = f"Registration rejected by site: {result.get('message')}"
         if fields:
             message += " (" + "; ".join(fields) + ")"
@@ -342,13 +363,19 @@ def log_in(page: Page, report: RunReport) -> str:
     page.get_by_role("button", name="Login", exact=True).last.click()
     individual = page.get_by_role("heading", name=re.compile(r"^\s*Individual\s*$", re.I))
     publish_btn = page.get_by_role("button", name=re.compile(r"^\s*Publish Your Profile", re.I))
-    stage, end = "", time.monotonic() + API_TIMEOUT_MS / 1000
+    stage, end, reopened = "", time.monotonic() + API_TIMEOUT_MS / 1000, False
     while not stage and time.monotonic() < end:
         if individual.first.is_visible():
             stage = "persona"
         elif "stepfour" in page.url and publish_btn.first.is_visible():
             stage = "profile"
         elif page.url.rstrip("/").endswith("/bhaskar/profile"):
+            user = json.loads(page.evaluate("() => localStorage.getItem('user') || '{}'"))
+            if not reopened and not user.get("published") and user.get("uidBhaskar") and user.get("bhaskarId"):
+                print(f"[INFO] Profile of {user['bhaskarId']} is not published yet; reopening the profile form")
+                page.goto(f"{URL}/stepfour?role={user.get('role')}&userid={user['uidBhaskar']}&bhaskarid={user['bhaskarId']}")
+                reopened = True
+                continue
             bid = SF.bhaskar_id_from_page(page)
             message = (f"This account has already finished registration (BHASKAR ID {bid or 'not read'}) and opens its "
                        f"dashboard. Use a new email and mobile with mode \"signup\" in test_data.json.")
@@ -365,7 +392,8 @@ def log_in(page: Page, report: RunReport) -> str:
     return stage
 
 
-def flow_step(page: Page, report: RunReport, name: str, action, note: str | Callable[[], str] = "", message: bool = False):
+def flow_step(page: Page, report: RunReport, name: str, action: Callable[[], T], note: str | Callable[[], str] = "",
+              message: bool = False) -> T:
     try:
         result = action()
     except Exception as e:
@@ -376,22 +404,29 @@ def flow_step(page: Page, report: RunReport, name: str, action, note: str | Call
     return result
 
 
-def register_persona(page: Page, report: RunReport, stage: str = "persona") -> None:
+def pick_persona() -> str:
+    if DATA["persona"] != "rotate":
+        return DATA["persona"]
+    last = PERSONA_STATE.read_text(encoding="utf-8").strip() if PERSONA_STATE.exists() else ""
+    return SF.next_persona(last)
+
+
+def register_persona(page: Page, report: RunReport, persona: str, stage: str = "persona") -> None:
     t = TIMEOUT_MS / 1000
-    data = SF.make_test_data(DATA["last_name"])
+    data = SF.make_test_data(DATA["last_name"], persona)
     report.test_data = data
-    print(f"[DATA] Year of birth {data['year_of_birth']}, {data['gender']}, PIN {data['pin']}, PAN {data['pan']}, "
-          f"{data['startup_name']}")
+    print(f"[DATA] {persona}: year of birth {data['year_of_birth']}, {data['gender']}, PIN {data['pin']}, "
+          f"PAN {data['pan']}, {data['org_name']}")
     if stage == "profile":
         report.set_stage("Complete your profile")
         report.bhaskar_id = SF.bhaskar_id_from_page(page)
         print(f"[INFO] Account already has BHASKAR ID {report.bhaskar_id or '(not read)'}; continuing with the profile")
-        complete_profile(page, report, data, t)
+        complete_profile(page, report, data, persona, t)
         return
     report.set_stage("Select entity type")
     flow_step(page, report, "Choose Individual", lambda: SF.choose_entity(page, t))
     report.set_stage("Select persona")
-    flow_step(page, report, "Choose Startup Founder / Entrepreneur", lambda: SF.choose_persona(page, t))
+    flow_step(page, report, f"Choose {persona}", lambda: SF.choose_persona(page, persona, t))
     report.set_stage("Basic details")
     flow_step(page, report, "Fill basic form", lambda: SF.fill_basic_form(page, data, DATA["email"], t),
               note=f"Year of birth {data['year_of_birth']}, {data['gender']}, India, PIN {data['pin']}, PAN {data['pan']}")
@@ -408,12 +443,13 @@ def register_persona(page: Page, report: RunReport, stage: str = "persona") -> N
     report.step(page, "Generate BHASKAR ID", note=f"BHASKAR ID: {bid or 'not read from the page'}", message=True)
     report.set_stage("Complete your profile")
     flow_step(page, report, "Open Complete your profile", lambda: SF.open_profile(page, t))
-    complete_profile(page, report, data, t)
+    complete_profile(page, report, data, persona, t)
 
 
-def complete_profile(page: Page, report: RunReport, data: dict, t: float) -> None:
-    empty: list = []
-    flow_step(page, report, "Fill public profile", lambda: empty.extend(SF.fill_profile(page, data, DATA["mobile"], print)),
+def complete_profile(page: Page, report: RunReport, data: dict[str, str], persona: str, t: float) -> None:
+    empty: list[str] = []
+    flow_step(page, report, "Fill public profile",
+              lambda: empty.extend(SF.fill_profile(page, data, DATA["mobile"], persona, print)),
               note=lambda: f"Dropdowns without options: {', '.join(empty)}" if empty else "All fields filled")
     try:
         published, replies = SF.publish(page, t)
@@ -434,8 +470,12 @@ def main() -> None:
         raise SystemExit('mode in test_data.json must be "signup" or "login"')
     if missing:
         raise SystemExit(f"Fill these values in test_data.json first: {', '.join(missing)}")
+    if DATA["persona"] != "rotate" and DATA["persona"] not in SF.PERSONAS:
+        raise SystemExit(f'persona in test_data.json must be "rotate" or one of: {", ".join(SF.PERSONAS)}')
 
+    persona = pick_persona()
     report = RunReport()
+    report.persona = f"{persona} (Individual)"
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO_MS)
         page = browser.new_context().new_page()
@@ -447,8 +487,9 @@ def main() -> None:
             else:
                 fill_registration_form(page, report)
                 generate_and_verify_otp(page, report)
-            register_persona(page, report, stage)
+            register_persona(page, report, persona, stage)
             report.result = "PASS"
+            PERSONA_STATE.write_text(persona, encoding="utf-8")
             print("[DONE] Profile published")
         except BaseException as e:
             report.result = "FAIL"

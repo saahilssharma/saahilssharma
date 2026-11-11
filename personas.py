@@ -2,14 +2,21 @@ import random
 import re
 import string
 import time
+from typing import Callable
 
-from playwright.sync_api import Page
+from playwright.sync_api import Locator, Page, Response
 
-PERSONA_LABELS = ["Startup Founder/Entrepreneur", "Startup Founder / Entrepreneur", "Startup Founder", "Entrepreneur"]
-PERSONA_CARD_TEXT = "An Indian individual, above the age of 18, engaged in a business activity"
+PERSONAS: dict[str, dict[str, str]] = {
+    "Startup Founder / Entrepreneur": {"card": r"^\s*Startup\s*Founder", "org_box": "Please input your Startup's",
+                                       "org": "QA Test Startup", "headline": "QA Test Founder"},
+    "Traditional Business Owner": {"card": r"^\s*Traditional\s*Business", "org_box": "Mention your current organisation",
+                                   "org": "QA Test Traders", "headline": "QA Test Business Owner"},
+}
+ANY_CARD_RX = re.compile(r"^\s*(Startup\s*Founder|Traditional\s*Business|Individual\s*Investor|Mentor|Enabler)", re.I)
 SITE_PAN_RX = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]{1}$")
 INDIVIDUAL_PAN_RX = re.compile(r"^[A-Z]{3}P[A-Z][0-9]{4}[A-Z]$")
 BHASKAR_ID_RX = re.compile(r"\b((?:IN|OI)-\d{4}-[A-Z0-9]{4,})\b")
+RNG = random.Random()
 PINS = ["110001", "400001", "560001", "600001", "380001", "500001", "226001", "700001", "302001", "122001"]
 
 
@@ -17,7 +24,7 @@ class FlowError(Exception):
     pass
 
 
-def make_pan(last_name: str, rng=random) -> str:
+def make_pan(last_name: str, rng: random.Random = RNG) -> str:
     pan = ("".join(rng.choice(string.ascii_uppercase) for _ in range(3)) + "P" + (last_name or "T")[0].upper()
            + f"{rng.randint(1, 9999):04d}" + rng.choice(string.ascii_uppercase))
     if not (SITE_PAN_RX.match(pan) and INDIVIDUAL_PAN_RX.match(pan)):
@@ -25,28 +32,34 @@ def make_pan(last_name: str, rng=random) -> str:
     return pan
 
 
-def make_test_data(last_name: str, rng=random) -> dict:
+def next_persona(last: str) -> str:
+    names = list(PERSONAS)
+    return names[(names.index(last) + 1) % len(names)] if last in names else names[0]
+
+
+def make_test_data(last_name: str, persona: str, rng: random.Random = RNG) -> dict[str, str]:
     tag = f"{rng.randint(1000, 9999)}"
+    p = PERSONAS[persona]
     return {
         "year_of_birth": str(rng.randint(1975, 2000)),
         "gender": rng.choice(["Male", "Female"]),
         "pin": rng.choice(PINS),
         "pan": make_pan(last_name, rng),
-        "startup_name": f"QA Test Startup {tag}",
-        "headline": f"QA Test Founder {tag}",
+        "org_name": f"{p['org']} {tag}",
+        "headline": f"{p['headline']} {tag}",
         "introduction": "QA automation test profile created by the daily production signup check.",
         "address": "QA Test Address",
     }
 
 
-def visible(loc, n=5):
+def visible(loc: Locator, n: int = 5) -> Locator | None:
     try:
         return next((loc.nth(i) for i in range(min(loc.count(), n)) if loc.nth(i).is_visible()), None)
     except Exception:
         return None
 
 
-def wait_visible(page: Page, make, timeout_s: float):
+def wait_visible(page: Page, make: Callable[[], Locator], timeout_s: float) -> Locator | None:
     end = time.time() + timeout_s
     while time.time() < end:
         el = visible(make())
@@ -56,7 +69,7 @@ def wait_visible(page: Page, make, timeout_s: float):
     return None
 
 
-def textbox(page: Page, name: str, exact: bool = False):
+def textbox(page: Page, name: str, exact: bool = False) -> Locator | None:
     return visible(page.get_by_role("textbox", name=name, exact=exact))
 
 
@@ -72,10 +85,10 @@ def fill_textbox(page: Page, name: str, value: str, exact: bool = False, require
     return True
 
 
-def click_button(page: Page, rx, timeout_s: float = 10):
+def click_button(page: Page, rx: str | re.Pattern[str], timeout_s: float = 10) -> Locator:
     el = wait_visible(page, lambda: page.get_by_role("button", name=rx), timeout_s)
     if el is None:
-        raise FlowError(f"button '{rx.pattern if hasattr(rx, 'pattern') else rx}' not found")
+        raise FlowError(f"button '{rx.pattern if isinstance(rx, re.Pattern) else rx}' not found")
     end = time.time() + 8
     while not el.is_enabled() and time.time() < end:
         page.wait_for_timeout(400)
@@ -109,11 +122,11 @@ REACT_INPUT_JS = r"""(rx) => {
 }"""
 
 
-def react_pick(page: Page, label_rx: str, want=None, count: int = 1):
-    rid = page.evaluate(REACT_INPUT_JS, label_rx)
+def react_pick(page: Page, label_rx: str, want: str | None = None, count: int = 1) -> list[str]:
+    rid: str | None = page.evaluate(REACT_INPUT_JS, label_rx)
     if not rid:
         raise FlowError(f"dropdown '{label_rx}' not found")
-    picked = []
+    picked: list[str] = []
     for _ in range(max(count, 1)):
         inp = page.locator(f"#{rid}")
         inp.scroll_into_view_if_needed()
@@ -178,8 +191,8 @@ def pick_year(page: Page, box_name: str, year: str, max_pages: int = 12) -> None
     raise FlowError(f"year {year} not reachable in the year picker")
 
 
-def persona_card(page: Page):
-    return visible(page.get_by_text(re.compile(r"^\s*Startup\s*Founder", re.I)), 10) or visible(page.get_by_text(PERSONA_CARD_TEXT))
+def persona_card(page: Page) -> Locator | None:
+    return visible(page.get_by_text(ANY_CARD_RX), 10)
 
 
 def choose_entity(page: Page, timeout_s: float) -> None:
@@ -195,17 +208,17 @@ def choose_entity(page: Page, timeout_s: float) -> None:
         raise FlowError("persona cards did not open after choosing 'Individual'")
 
 
-def choose_persona(page: Page, timeout_s: float) -> None:
-    card = wait_visible(page, lambda: page.get_by_text(re.compile(r"^\s*Startup\s*Founder", re.I)), timeout_s) or persona_card(page)
+def choose_persona(page: Page, persona: str, timeout_s: float) -> None:
+    card = wait_visible(page, lambda: page.get_by_text(re.compile(PERSONAS[persona]["card"], re.I)), timeout_s)
     if card is None:
         shown = [t.strip() for t in page.locator("h1, h2, h3, h4, h5, h6, p, span").all_inner_texts() if t.strip()][:40]
-        raise FlowError(f"'Startup Founder' card not found. Texts on page: {shown}")
+        raise FlowError(f"'{persona}' card not found. Texts on page: {shown}")
     card.scroll_into_view_if_needed()
     card.click(force=True)
     page.wait_for_timeout(800)
 
 
-def fill_basic_form(page: Page, data: dict, email: str, timeout_s: float) -> None:
+def fill_basic_form(page: Page, data: dict[str, str], email: str, timeout_s: float) -> None:
     if wait_visible(page, lambda: page.get_by_role("textbox", name="Select year of birth"), timeout_s) is None:
         raise FlowError("basic form (year of birth) did not open")
     pick_year(page, "Select year of birth", data["year_of_birth"])
@@ -272,10 +285,10 @@ def open_profile(page: Page, timeout_s: float) -> None:
         raise FlowError("profile form did not open after 'Complete your profile'")
 
 
-def fill_profile(page: Page, data: dict, mobile: str, log) -> list:
-    empty = []
+def fill_profile(page: Page, data: dict[str, str], mobile: str, persona: str, log: Callable[[str], None]) -> list[str]:
+    empty: list[str] = []
 
-    def pick(label_rx, want=None, count=1, name=None):
+    def pick(label_rx: str, want: str | None = None, count: int = 1, name: str | None = None) -> None:
         try:
             got = react_pick(page, label_rx, want, count)
             log(f"{name or label_rx}: {', '.join(got) or 'no options'}")
@@ -310,17 +323,22 @@ def fill_profile(page: Page, data: dict, mobile: str, log) -> list:
             el.fill(v)
     for n in ("emailNotifications", "smsWhatsappNotifications", "inAppNotifications"):
         switch(page, n, True)
-    fill_textbox(page, "Please input your Startup's", data["startup_name"])
+    org_box = PERSONAS[persona]["org_box"]
+    if not fill_textbox(page, org_box, data["org_name"], required=False):
+        box = visible(page.locator("input[name='nameOfBusiness'], input[name='nameOfStartup']"))
+        if box is None:
+            raise FlowError(f"organisation name box '{org_box}...' not found")
+        box.fill(data["org_name"])
     pick(r"^Country Of Headquarter", want="India", name="Country of Headquarter")
     pick(r"^Current Role", want="CXO level role", name="Current Role")
     return empty
 
 
-def publish(page: Page, timeout_s: float):
+def publish(page: Page, timeout_s: float) -> tuple[bool, list[str]]:
     before = page.url
-    replies = []
+    replies: list[str] = []
 
-    def on_response(r):
+    def on_response(r: Response) -> None:
         if "/sih/api" in r.url and r.request.method in ("POST", "PUT", "PATCH"):
             try:
                 body = " ".join(r.text().split())[:300]
