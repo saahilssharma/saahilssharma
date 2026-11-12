@@ -43,6 +43,7 @@ REGISTER_API = "/sih/api/noauth/signup/bhaskar/register"
 REPORT_DIR = Path(__file__).with_name("reports")
 REPORT_FILE = REPORT_DIR / "BHASKAR_PROD_Daily_Signup_Report.docx"
 SCREENSHOT_DIR = REPORT_DIR / "screenshots"
+REPORT_TITLE = "BHASKAR Production - Daily Signup"
 
 LOC = {
     "first_name":       "#firstName",
@@ -158,7 +159,7 @@ class RunReport:
             assert isinstance(normal, ParagraphStyle)
             normal.font.name = "Calibri"
             normal.font.size = Pt(10)
-            doc.add_heading("BHASKAR Production - Daily Signup", 0)
+            doc.add_heading(REPORT_TITLE, 0)
         doc.add_heading(f"Run {self.started:%d-%b-%Y %H:%M:%S} - {self.result}", 1)
         self._kv(doc, "Result", self.result, {"PASS": GREEN, "FAIL": RED}.get(self.result, AMBER))
         self._kv(doc, "Run", f"{self.started:%d-%b-%Y %H:%M:%S}  ->  {datetime.now():%H:%M:%S}")
@@ -363,10 +364,13 @@ def log_in(page: Page, report: RunReport) -> str:
     page.get_by_role("button", name="Login", exact=True).last.click()
     individual = page.get_by_role("heading", name=re.compile(r"^\s*Individual\s*$", re.I))
     publish_btn = page.get_by_role("button", name=re.compile(r"^\s*Publish Your Profile", re.I))
+    year_box = page.get_by_role("textbox", name="Select year of birth")
     stage, end, reopened = "", time.monotonic() + API_TIMEOUT_MS / 1000, False
     while not stage and time.monotonic() < end:
         if individual.first.is_visible():
             stage = "persona"
+        elif year_box.first.is_visible():
+            stage = "basic"
         elif "stepfour" in page.url and publish_btn.first.is_visible():
             stage = "profile"
         elif page.url.rstrip("/").endswith("/bhaskar/profile"):
@@ -387,7 +391,7 @@ def log_in(page: Page, report: RunReport) -> str:
         message = f"Neither persona selection nor the profile form opened after login; now on {page.url}"
         report.step(page, "Log in", "FAIL", message, message=True)
         raise RuntimeError(message)
-    where = "persona selection" if stage == "persona" else "Complete Your Public Profile"
+    where = {"persona": "persona selection", "basic": "Basic details"}.get(stage, "Complete Your Public Profile")
     report.step(page, "Log in", note=f"Logged in as {DATA['email']}, landed on {where}", message=True)
     return stage
 
@@ -423,10 +427,11 @@ def register_persona(page: Page, report: RunReport, persona: str, stage: str = "
         print(f"[INFO] Account already has BHASKAR ID {report.bhaskar_id or '(not read)'}; continuing with the profile")
         complete_profile(page, report, data, persona, t)
         return
-    report.set_stage("Select entity type")
-    flow_step(page, report, "Choose Individual", lambda: SF.choose_entity(page, t))
-    report.set_stage("Select persona")
-    flow_step(page, report, f"Choose {persona}", lambda: SF.choose_persona(page, persona, t))
+    if stage == "persona":
+        report.set_stage("Select entity type")
+        flow_step(page, report, "Choose Individual", lambda: SF.choose_entity(page, t))
+        report.set_stage("Select persona")
+        flow_step(page, report, f"Choose {persona}", lambda: SF.choose_persona(page, persona, t))
     report.set_stage("Basic details")
     flow_step(page, report, "Fill basic form", lambda: SF.fill_basic_form(page, data, DATA["email"], t),
               note=f"Year of birth {data['year_of_birth']}, {data['gender']}, India, PIN {data['pin']}, PAN {data['pan']}")
@@ -464,7 +469,7 @@ def complete_profile(page: Page, report: RunReport, data: dict[str, str], person
     report.step(page, "Publish Your Profile", note=f"Published. Server: {details}", message=True)
 
 
-def main() -> None:
+def main(persona: str | None = None, rotate: bool = True, on_page: Callable[[Page], None] | None = None) -> None:
     missing = [k for k, v in DATA.items() if not v]
     if DATA["mode"] not in ("signup", "login"):
         raise SystemExit('mode in test_data.json must be "signup" or "login"')
@@ -473,13 +478,17 @@ def main() -> None:
     if DATA["persona"] != "rotate" and DATA["persona"] not in SF.PERSONAS:
         raise SystemExit(f'persona in test_data.json must be "rotate" or one of: {", ".join(SF.PERSONAS)}')
 
-    persona = pick_persona()
+    persona = persona or pick_persona()
+    if persona not in SF.PERSONAS:
+        raise SystemExit(f'Unknown persona "{persona}". Choose one of: {", ".join(SF.PERSONAS)}')
     report = RunReport()
     report.persona = f"{persona} (Individual)"
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO_MS)
         page = browser.new_context().new_page()
         page.set_default_timeout(TIMEOUT_MS)
+        if on_page is not None:
+            on_page(page)
         try:
             stage = "persona"
             if DATA["mode"] == "login":
@@ -489,7 +498,8 @@ def main() -> None:
                 generate_and_verify_otp(page, report)
             register_persona(page, report, persona, stage)
             report.result = "PASS"
-            PERSONA_STATE.write_text(persona, encoding="utf-8")
+            if rotate:
+                PERSONA_STATE.write_text(persona, encoding="utf-8")
             print("[DONE] Profile published")
         except BaseException as e:
             report.result = "FAIL"

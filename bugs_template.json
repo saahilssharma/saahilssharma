@@ -1,0 +1,28 @@
+{
+  "run": {
+    "heading": "Bug run DD-Mon-YYYY HH:MM (Persona) - new findings",
+    "info": {
+      "Test user": "email / mobile",
+      "Persona": "Individual - Persona name",
+      "Result": "PASS / FAIL and where",
+      "Screenshots": "reports/bug_runs/screenshots/YYYY-MM-DD_HHMMSS"
+    }
+  },
+  "bugs": [
+    {
+      "severity": "Medium",
+      "type": "Validation",
+      "stage": "7. Complete your profile",
+      "title": "One-line description of the problem",
+      "steps": [
+        "First step to reproduce.",
+        "Second step."
+      ],
+      "expected": "What should happen.",
+      "actual": "What happened, with the exact message or server reply.",
+      "evidence": [
+        {"file": "reports/bug_runs/screenshots/YYYY-MM-DD_HHMMSS/10_S7_Publish_Your_Profile_FAIL.png", "caption": "What the image shows", "width": 6.0}
+      ]
+    }
+  ]
+}

@@ -11,6 +11,8 @@ PERSONAS: dict[str, dict[str, str]] = {
                                        "org": "QA Test Startup", "headline": "QA Test Founder"},
     "Traditional Business Owner": {"card": r"^\s*Traditional\s*Business", "org_box": "Mention your current organisation",
                                    "org": "QA Test Traders", "headline": "QA Test Business Owner"},
+    "Mentor": {"card": r"^\s*Mentor\s*$", "org_box": "Mention your current organisation",
+               "org": "QA Test Mentoring", "headline": "QA Test Mentor"},
 }
 ANY_CARD_RX = re.compile(r"^\s*(Startup\s*Founder|Traditional\s*Business|Individual\s*Investor|Mentor|Enabler)", re.I)
 SITE_PAN_RX = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]{1}$")
@@ -39,13 +41,14 @@ def next_persona(last: str) -> str:
 
 def make_test_data(last_name: str, persona: str, rng: random.Random = RNG) -> dict[str, str]:
     tag = f"{rng.randint(1000, 9999)}"
+    word = "".join(rng.choice(string.ascii_uppercase) for _ in range(4))
     p = PERSONAS[persona]
     return {
         "year_of_birth": str(rng.randint(1975, 2000)),
         "gender": rng.choice(["Male", "Female"]),
         "pin": rng.choice(PINS),
         "pan": make_pan(last_name, rng),
-        "org_name": f"{p['org']} {tag}",
+        "org_name": f"{p['org']} {word}",
         "headline": f"{p['headline']} {tag}",
         "introduction": "QA automation test profile created by the daily production signup check.",
         "address": "QA Test Address",
@@ -126,6 +129,10 @@ def react_pick(page: Page, label_rx: str, want: str | None = None, count: int = 
     rid: str | None = page.evaluate(REACT_INPUT_JS, label_rx)
     if not rid:
         raise FlowError(f"dropdown '{label_rx}' not found")
+    return react_pick_id(page, rid, want, count)
+
+
+def react_pick_id(page: Page, rid: str, want: str | None = None, count: int = 1) -> list[str]:
     picked: list[str] = []
     for _ in range(max(count, 1)):
         inp = page.locator(f"#{rid}")
@@ -136,7 +143,7 @@ def react_pick(page: Page, label_rx: str, want: str | None = None, count: int = 
             page.keyboard.type(str(want))
             page.wait_for_timeout(500)
         opts = page.get_by_role("option")
-        names = [opts.nth(i).inner_text().strip() for i in range(min(opts.count(), 60))]
+        names = [n.strip() for n in opts.all_inner_texts()]
         names = [n for n in names if n and n not in picked]
         if not names:
             page.keyboard.press("Escape")
@@ -171,24 +178,31 @@ def switch(page: Page, name: str, on: bool = True) -> bool:
     return inp.is_checked() == on
 
 
-def pick_year(page: Page, box_name: str, year: str, max_pages: int = 12) -> None:
-    box = textbox(page, box_name)
-    if box is None:
-        raise FlowError(f"year picker '{box_name}' not found")
-    box.click()
-    page.wait_for_timeout(300)
-    for _ in range(max_pages):
-        cell = visible(page.get_by_text(str(year), exact=True))
-        if cell is not None:
-            cell.click()
-            page.wait_for_timeout(300)
+def pick_year(page: Page, box_name: str, year: str, max_pages: int = 12, attempts: int = 3) -> None:
+    for _ in range(attempts):
+        box = textbox(page, box_name)
+        if box is None:
+            raise FlowError(f"year picker '{box_name}' not found")
+        box.scroll_into_view_if_needed()
+        box.click()
+        page.wait_for_timeout(500)
+        for _ in range(max_pages):
+            cell = visible(page.locator(".react-datepicker__year-text, [class*='year-text']").get_by_text(str(year), exact=True)) \
+                or visible(page.get_by_text(str(year), exact=True))
+            if cell is not None:
+                cell.click()
+                page.wait_for_timeout(500)
+                break
+            prev = visible(page.get_by_role("button", name=re.compile(r"previous", re.I)))
+            if prev is None:
+                break
+            prev.click()
+            page.wait_for_timeout(250)
+        if box.input_value().strip() == str(year):
             return
-        prev = visible(page.get_by_role("button", name=re.compile(r"previous", re.I)))
-        if prev is None:
-            break
-        prev.click()
-        page.wait_for_timeout(250)
-    raise FlowError(f"year {year} not reachable in the year picker")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+    raise FlowError(f"year {year} was not kept by the year picker '{box_name}'")
 
 
 def persona_card(page: Page) -> Locator | None:
@@ -326,12 +340,96 @@ def fill_profile(page: Page, data: dict[str, str], mobile: str, persona: str, lo
     org_box = PERSONAS[persona]["org_box"]
     if not fill_textbox(page, org_box, data["org_name"], required=False):
         box = visible(page.locator("input[name='nameOfBusiness'], input[name='nameOfStartup']"))
-        if box is None:
-            raise FlowError(f"organisation name box '{org_box}...' not found")
-        box.fill(data["org_name"])
-    pick(r"^Country Of Headquarter", want="India", name="Country of Headquarter")
-    pick(r"^Current Role", want="CXO level role", name="Current Role")
+        if box is not None:
+            box.fill(data["org_name"])
+        else:
+            log(f"Organisation box '{org_box}' not found; left to the remaining-fields pass")
+    for label_rx, want in ((r"^Country Of Headquarter", "India"), (r"^Current Role", "CXO level role")):
+        if page.evaluate(REACT_INPUT_JS, label_rx):
+            pick(label_rx, want=want, name=label_rx.strip("^"))
+    fill_remaining(page, data, log)
     return empty
+
+
+EMPTY_FIELDS_JS = r"""() => {
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const label = e => {
+    for (let p = e.parentElement, i = 0; p && i < 7; p = p.parentElement, i++) {
+      const l = p.querySelector('label, h5, h6');
+      if (l && l.innerText.trim()) return l.innerText.trim().split('\n')[0];
+    }
+    return '';
+  };
+  const out = [];
+  const main = document.querySelector('footer');
+  const inMain = e => !(main && main.contains(e));
+  for (const e of document.querySelectorAll('input[id^="react-select-"][id$="-input"]')) {
+    const c = e.closest('[class*="container"]');
+    if (!c || !vis(c) || !inMain(e)) continue;
+    if (c.querySelector('[class*="singleValue"], [class*="multiValue"], [class*="single-value"], [class*="multi-value"]')) continue;
+    if (c.querySelector('input[disabled]') || e.disabled) continue;
+    out.push({kind: 'select', id: e.id, label: label(c)});
+  }
+  for (const e of document.querySelectorAll('input[type=text], input:not([type]), textarea')) {
+    if (e.id.startsWith('react-select') || !vis(e) || !inMain(e) || e.value || e.disabled || e.readOnly) continue;
+    out.push({kind: 'text', name: e.name, placeholder: e.placeholder, label: label(e)});
+  }
+  const groups = {};
+  for (const e of document.querySelectorAll('input[type=radio]')) {
+    if (!inMain(e) || e.disabled) continue;
+    (groups[e.name] = groups[e.name] || []).push(e);
+  }
+  for (const [name, list] of Object.entries(groups)) {
+    if (!list.some(x => x.checked) && list.some(x => vis(x) || vis(x.parentElement))) out.push({kind: 'radio', name, label: label(list[0])});
+  }
+  return out;
+}"""
+
+
+def fill_remaining(page: Page, data: dict[str, str], log: Callable[[str], None], passes: int = 3) -> None:
+    done: set[str] = set()
+    for _ in range(passes):
+        fields: list[dict[str, str]] = page.evaluate(EMPTY_FIELDS_JS)
+        fields = [f for f in fields if (f.get("id") or f.get("name") or f.get("placeholder", "")) not in done]
+        if not fields:
+            return
+        for f in fields:
+            key = f.get("id") or f.get("name") or f.get("placeholder", "")
+            done.add(key)
+            label = f.get("label", "")
+            try:
+                if f["kind"] == "radio":
+                    radios = page.locator(f'input[type=radio][name="{f["name"]}"]')
+                    choice = radios.last if re.search(r"agnostic", label, re.I) else radios.first
+                    choice.check(force=True)
+                    log(f"[extra] {label or f['name']}: radio option {choice.get_attribute('value')}")
+                elif f["kind"] == "select":
+                    multi = bool(re.search(r"area|expertise|sector|stage|mode|type", label, re.I))
+                    year = None
+                    if re.search(r"\byear\b|since", label, re.I):
+                        year = "2015" if re.search(r"start|since", label, re.I) else "2024"
+                    got = react_pick_id(page, f["id"], want=year, count=1 if year or not multi else 2)
+                    log(f"[extra] {label or f['id']}: {', '.join(got) or 'no options'}")
+                else:
+                    box = page.locator(f'[name="{f["name"]}"]').first if f.get("name") else page.get_by_placeholder(f["placeholder"]).first
+                    text = label.upper()
+                    if "YEAR" in text:
+                        value = "2015" if "START" in text or "SINCE" in text else "2024"
+                        box.click()
+                        page.wait_for_timeout(300)
+                        cell = visible(page.get_by_text(value, exact=True))
+                        if cell is not None:
+                            cell.click()
+                        else:
+                            box.fill(value)
+                    else:
+                        value = (data["org_name"] if "ORGANI" in text else "QA Lead" if "DESIGNATION" in text
+                                 else "https://example.com" if "HTTP" in text or "LINK" in text else "QA Test")
+                        box.fill(value)
+                    log(f"[extra] {label or f.get('name') or f.get('placeholder')}: {value}")
+                page.wait_for_timeout(300)
+            except Exception as e:
+                log(f"[extra] {label or key}: could not fill ({type(e).__name__})")
 
 
 def publish(page: Page, timeout_s: float) -> tuple[bool, list[str]]:
