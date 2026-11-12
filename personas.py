@@ -6,15 +6,36 @@ from typing import Callable
 
 from playwright.sync_api import Locator, Page, Response
 
+IND, ORG = "Individual", "Organization"
+
+
+def _persona(entity: str, card: str, org: str, headline: str, org_box: str = "", daily: bool = False) -> dict[str, str]:
+    return {"entity": entity, "card": card, "org": org, "headline": headline, "org_box": org_box, "daily": "1" if daily else ""}
+
+
 PERSONAS: dict[str, dict[str, str]] = {
-    "Startup Founder / Entrepreneur": {"card": r"^\s*Startup\s*Founder", "org_box": "Please input your Startup's",
-                                       "org": "QA Test Startup", "headline": "QA Test Founder"},
-    "Traditional Business Owner": {"card": r"^\s*Traditional\s*Business", "org_box": "Mention your current organisation",
-                                   "org": "QA Test Traders", "headline": "QA Test Business Owner"},
-    "Mentor": {"card": r"^\s*Mentor\s*$", "org_box": "Mention your current organisation",
-               "org": "QA Test Mentoring", "headline": "QA Test Mentor"},
+    "Startup Founder / Entrepreneur": _persona(IND, r"^\s*Startup\s*Founder", "QA Test Startup", "QA Test Founder",
+                                               "Please input your Startup's", True),
+    "Traditional Business Owner": _persona(IND, r"^\s*Traditional\s*Business\s*(Owner|\.\.\.)?\s*$", "QA Test Traders",
+                                           "QA Test Business Owner", "Mention your current organisation", True),
+    "Mentor": _persona(IND, r"^\s*Mentor\s*$", "QA Test Mentoring", "QA Test Mentor", "Mention your current organisation", True),
+    "Individual Investor": _persona(IND, r"^\s*Individual\s*Investor\s*$", "QA Test Investments", "QA Test Investor"),
+    "Enabler": _persona(IND, r"^\s*Enabler\s*$", "QA Test Enablers", "QA Test Enabler"),
+    "Explorer": _persona(IND, r"^\s*Explorers?\s*$", "QA Test Explorers", "QA Test Explorer"),
+    "Student": _persona(IND, r"^\s*Students?\s*$", "QA Test College", "QA Test Student"),
+    "Startup": _persona(ORG, r"^\s*Startups?\s*$", "QA Test Startup Labs", "QA Test Startup Organisation"),
+    "Traditional Businesses": _persona(ORG, r"^\s*Traditional\s*Business(es)?\s*$", "QA Test Enterprises", "QA Test Business"),
+    "Incubator": _persona(ORG, r"^\s*Incubators?\s*$", "QA Test Incubation Centre", "QA Test Incubator"),
+    "Accelerator": _persona(ORG, r"^\s*Accelerators?\s*$", "QA Test Accelerator Hub", "QA Test Accelerator"),
+    "Corporates": _persona(ORG, r"^\s*Corporates?\s*$", "QA Test Corporation", "QA Test Corporate"),
+    "Institutional Investor": _persona(ORG, r"^\s*Institutional\s*Investors?", "QA Test Capital", "QA Test Fund"),
+    "Industry Association": _persona(ORG, r"^\s*Industry\s*Associations?\s*$", "QA Test Industry Council", "QA Test Association"),
+    "Government Bodies": _persona(ORG, r"^\s*(Government\s*Bod(y|ies)|Govt\.?\s*Bod(y|ies))", "QA Test Department", "QA Test Government Body"),
+    "Service Enabler": _persona(ORG, r"^\s*Service\s*Enablers?\s*$", "QA Test Services", "QA Test Service Enabler"),
+    "Academia": _persona(ORG, r"^\s*(Academia|Academic\s*Institutions?)\s*$", "QA Test Institute", "QA Test Academia"),
 }
-ANY_CARD_RX = re.compile(r"^\s*(Startup\s*Founder|Traditional\s*Business|Individual\s*Investor|Mentor|Enabler)", re.I)
+ANY_CARD_RX = re.compile("|".join(f"(?:{v['card']})" for v in PERSONAS.values()), re.I)
+DAILY = [k for k, v in PERSONAS.items() if v["daily"]]
 SITE_PAN_RX = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]{1}$")
 INDIVIDUAL_PAN_RX = re.compile(r"^[A-Z]{3}P[A-Z][0-9]{4}[A-Z]$")
 BHASKAR_ID_RX = re.compile(r"\b((?:IN|OI)-\d{4}-[A-Z0-9]{4,})\b")
@@ -35,7 +56,7 @@ def make_pan(last_name: str, rng: random.Random = RNG) -> str:
 
 
 def next_persona(last: str) -> str:
-    names = list(PERSONAS)
+    names = DAILY
     return names[(names.index(last) + 1) % len(names)] if last in names else names[0]
 
 
@@ -43,16 +64,65 @@ def make_test_data(last_name: str, persona: str, rng: random.Random = RNG) -> di
     tag = f"{rng.randint(1000, 9999)}"
     word = "".join(rng.choice(string.ascii_uppercase) for _ in range(4))
     p = PERSONAS[persona]
+    pin = rng.choice(PINS)
+    state_letters, gst_code = PIN_STATE[pin[:2]]
+    org_pan = make_org_pan("C", rng)
     return {
         "year_of_birth": str(rng.randint(1975, 2000)),
         "gender": rng.choice(["Male", "Female"]),
-        "pin": rng.choice(PINS),
+        "pin": pin,
         "pan": make_pan(last_name, rng),
+        "org_pan": org_pan,
+        "cin": f"U{rng.choice(['72900', '62099', '63999', '74999'])}{state_letters}{rng.randint(2012, 2022)}PTC{rng.randint(1, 999999):06d}",
+        "gstin": make_gstin(org_pan, gst_code),
+        "udyam": f"UDYAM-{state_letters}-{rng.randint(1, 30):02d}-{rng.randint(1, 9999999):07d}",
+        "sebi": f"INA{rng.randint(100000000, 999999999)}",
+        "founded": str(rng.randint(2012, 2022)),
         "org_name": f"{p['org']} {word}",
         "headline": f"{p['headline']} {tag}",
-        "introduction": "QA automation test profile created by the daily production signup check.",
+        "introduction": "QA automation test profile created by the production bug finding check.",
         "address": "QA Test Address",
     }
+
+
+PIN_STATE = {"11": ("DL", "07"), "40": ("MH", "27"), "56": ("KA", "29"), "60": ("TN", "33"), "38": ("GJ", "24"),
+             "50": ("TG", "36"), "22": ("UP", "09"), "70": ("WB", "19"), "30": ("RJ", "08"), "12": ("HR", "06")}
+CHARS36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def make_org_pan(holder: str, rng: random.Random = RNG) -> str:
+    return ("".join(rng.choice(string.ascii_uppercase) for _ in range(3)) + holder + "Q"
+            + f"{rng.randint(1, 9999):04d}" + rng.choice(string.ascii_uppercase))
+
+
+def make_gstin(pan: str, state_code: str) -> str:
+    base = f"{state_code}{pan}1Z"
+    total = 0
+    for i, ch in enumerate(base):
+        prod = CHARS36.index(ch) * (1 if i % 2 == 0 else 2)
+        total += prod // 36 + prod % 36
+    return base + CHARS36[(36 - total % 36) % 36]
+
+
+def value_for(label: str, placeholder: str, data: dict[str, str]) -> str:
+    t = f"{label} {placeholder}".upper()
+    if "PAN" in re.findall(r"[A-Z]+", t):
+        return data["org_pan"] if re.search(r"ENTITY|ORGANI|COMPANY|FIRM", t) else data["pan"]
+    rules: list[tuple[str, str]] = [
+        (r"\bCIN\b", data["cin"]), (r"GSTIN|\bGST\b", data["gstin"]), (r"UDYAM", data["udyam"]),
+        (r"SEBI", data["sebi"]), (r"PIN|ZIP|POSTAL", data["pin"]),
+        (r"SECONDARY.*E-?MAIL|E-?MAIL.*(KEY PERSON|E-CELL|PROGRAM|DEPARTMENT)", "qa.tester@example.com"),
+        (r"E-?MAIL", data.get("email", "")), (r"PHONE|MOBILE|CONTACT NUMBER|HELPLINE|TELEPHONE", data.get("mobile", "")),
+        (r"HTTP|LINK|URL|WEBSITE|VLOG|BLOG", "https://example.com"),
+        (r"^\s*(IN)?DIRECT\b|EMPLOYEE|JOBS|HEADCOUNT|TEAM SIZE|NUMBER OF|AMOUNT|HOW MANY|COUNT|TOTAL", "10"),
+        (r"DESIGNATION|\bROLE\b", "Director"),
+        (r"NAME OF (A )?KEY PERSON|LEAD|FOUNDING TEAM MEMBER|CONTACT PERSON|FIRST NAME|LAST NAME", "QA Tester"),
+        (r"ADDRESS", data["address"]),
+        (r"HEADLINE", data["headline"]),
+        (r"INTRODUCTION|DESCRIPTION|DETAILS|PROCESS|ABOUT|AWARD|RECOGNITION|SUPPORT", "QA test details for the bug finding run"),
+        (r"NAME|ORGANI|ENTITY|INSTITUT|BRAND|PROGRAM|FUND|COMPANY|UNIVERSITY|COLLEGE|BOARD|E-CELL|DEPARTMENT", data["org_name"]),
+    ]
+    return next((v for rx, v in rules if re.search(rx, t)), "QA Test")
 
 
 def visible(loc: Locator, n: int = 5) -> Locator | None:
@@ -209,17 +279,21 @@ def persona_card(page: Page) -> Locator | None:
     return visible(page.get_by_text(ANY_CARD_RX), 10)
 
 
-def choose_entity(page: Page, timeout_s: float) -> None:
-    head = wait_visible(page, lambda: page.get_by_role("heading", name=re.compile(r"^\s*Individual\s*$", re.I)), timeout_s)
+def choose_entity(page: Page, persona: str, timeout_s: float) -> None:
+    entity = PERSONAS[persona]["entity"]
+    rx = re.compile(r"^\s*Organi[sz]ation\s*$" if entity == ORG else r"^\s*Individual\s*$", re.I)
+    head = wait_visible(page, lambda: page.get_by_role("heading", name=rx), timeout_s)
     if head is None:
-        raise FlowError("'Individual' entity type not shown")
+        raise FlowError(f"'{entity}' entity type not shown")
+    card_rx = re.compile(PERSONAS[persona]["card"], re.I)
     for _ in range(3):
-        if persona_card(page) is not None:
+        if visible(page.get_by_text(card_rx), 10) is not None:
             return
         head.click()
         page.wait_for_timeout(1500)
-    if persona_card(page) is None:
-        raise FlowError("persona cards did not open after choosing 'Individual'")
+    if visible(page.get_by_text(card_rx), 10) is None:
+        shown = [t.strip() for t in page.locator("h1, h2, h3, h4, h5, h6, p, span").all_inner_texts() if t.strip()][:40]
+        raise FlowError(f"'{persona}' card not shown after choosing '{entity}'. Texts on page: {shown}")
 
 
 def choose_persona(page: Page, persona: str, timeout_s: float) -> None:
@@ -232,10 +306,14 @@ def choose_persona(page: Page, persona: str, timeout_s: float) -> None:
     page.wait_for_timeout(800)
 
 
-def fill_basic_form(page: Page, data: dict[str, str], email: str, timeout_s: float) -> None:
-    if wait_visible(page, lambda: page.get_by_role("textbox", name="Select year of birth"), timeout_s) is None:
-        raise FlowError("basic form (year of birth) did not open")
-    pick_year(page, "Select year of birth", data["year_of_birth"])
+def fill_basic_form(page: Page, data: dict[str, str], email: str, timeout_s: float,
+                    log: Callable[[str], None] = print) -> None:
+    submit = re.compile(r"^\s*PREVIEW AND SUBMIT", re.I)
+    if wait_visible(page, lambda: page.get_by_role("button", name=submit), timeout_s) is None:
+        raise FlowError("basic form (PREVIEW AND SUBMIT) did not open")
+    page.wait_for_timeout(1500)
+    if textbox(page, "Select year of birth") is not None:
+        pick_year(page, "Select year of birth", data["year_of_birth"])
     gender = page.locator('select[name="gender"]')
     if gender.count():
         try:
@@ -245,15 +323,16 @@ def fill_basic_form(page: Page, data: dict[str, str], email: str, timeout_s: flo
     country = page.locator('select[name="country"]')
     if country.count():
         country.select_option(label="India")
-    fill_textbox(page, "Please write the 6 digit pin", data["pin"])
-    page.wait_for_timeout(1500)
-    fill_textbox(page, "Please enter your PAN.", data["pan"])
+    if fill_textbox(page, "Please write the 6 digit pin", data["pin"], required=False):
+        page.wait_for_timeout(1500)
+    fill_textbox(page, "Please enter your PAN.", data["pan"], required=False)
     sliders = page.locator(".switch input[type=checkbox], label.switch input")
     if sliders.count() and not sliders.first.is_checked():
         sliders.first.locator("xpath=following-sibling::*[contains(@class,'slider')][1]").click(force=True)
     box = textbox(page, "Enter your Email ID for all")
     if box is not None and not box.input_value():
         box.fill(email)
+    fill_remaining(page, data, log)
 
 
 def preview_and_submit(page: Page, timeout_s: float) -> None:
@@ -370,9 +449,14 @@ EMPTY_FIELDS_JS = r"""() => {
     if (c.querySelector('input[disabled]') || e.disabled) continue;
     out.push({kind: 'select', id: e.id, label: label(c)});
   }
-  for (const e of document.querySelectorAll('input[type=text], input:not([type]), textarea')) {
-    if (e.id.startsWith('react-select') || !vis(e) || !inMain(e) || e.value || e.disabled || e.readOnly) continue;
-    out.push({kind: 'text', name: e.name, placeholder: e.placeholder, label: label(e)});
+  for (const e of document.querySelectorAll('input[type=text], input[type=number], input[type=tel], input[type=email], input[type=date], input:not([type]), textarea')) {
+    if (e.id.startsWith('react-select') || !vis(e) || !inMain(e) || e.value || e.disabled) continue;
+    if (e.placeholder === 'Enter your email') continue;
+    out.push({kind: 'text', name: e.name, placeholder: e.placeholder, label: label(e), type: e.type, ro: e.readOnly ? '1' : ''});
+  }
+  for (const e of document.querySelectorAll('select')) {
+    if (!vis(e) || !inMain(e) || e.disabled || e.value) continue;
+    out.push({kind: 'native', name: e.name, id: e.id, label: label(e)});
   }
   const groups = {};
   for (const e of document.querySelectorAll('input[type=radio]')) {
@@ -410,22 +494,49 @@ def fill_remaining(page: Page, data: dict[str, str], log: Callable[[str], None],
                         year = "2015" if re.search(r"start|since", label, re.I) else "2024"
                     got = react_pick_id(page, f["id"], want=year, count=1 if year or not multi else 2)
                     log(f"[extra] {label or f['id']}: {', '.join(got) or 'no options'}")
+                elif f["kind"] == "native":
+                    sel = page.locator(f'select[name="{f["name"]}"]').first if f.get("name") else page.locator(f'#{f["id"]}')
+                    options = [o for o in sel.locator("option").all_inner_texts() if o.strip()]
+                    usable = [o for o in options if not re.search(r"^\s*(select|please|--|choose)", o, re.I)]
+                    choice = next((o for o in usable if o.strip() in ("India", "Male")), usable[0] if usable else "")
+                    if choice:
+                        sel.select_option(label=choice)
+                    log(f"[extra] {label or f.get('name')}: {choice or 'no options'}")
                 else:
-                    box = page.locator(f'[name="{f["name"]}"]').first if f.get("name") else page.get_by_placeholder(f["placeholder"]).first
-                    text = label.upper()
-                    if "YEAR" in text:
-                        value = "2015" if "START" in text or "SINCE" in text else "2024"
-                        box.click()
-                        page.wait_for_timeout(300)
-                        cell = visible(page.get_by_text(value, exact=True))
-                        if cell is not None:
-                            cell.click()
-                        else:
-                            box.fill(value)
+                    if f.get("name"):
+                        box = page.locator(f'[name="{f["name"]}"]').first
+                    elif f.get("placeholder"):
+                        box = page.get_by_placeholder(f["placeholder"], exact=True).first
                     else:
-                        value = (data["org_name"] if "ORGANI" in text else "QA Lead" if "DESIGNATION" in text
-                                 else "https://example.com" if "HTTP" in text or "LINK" in text else "QA Test")
+                        continue
+                    text = f"{label} {f.get('placeholder', '')}".upper()
+                    if f.get("type") == "date" or re.search(r"\bDATE\b", text):
+                        value = f"{data['founded']}-04-01" if f.get("type") == "date" else f"01/04/{data['founded']}"
                         box.fill(value)
+                        page.keyboard.press("Escape")
+                    elif re.search(r"\bYEAR\b|SINCE", text):
+                        value = ("2015" if re.search(r"START|SINCE", text) else data["year_of_birth"] if "BIRTH" in text
+                                 else data["founded"] if re.search(r"INCORPORAT|ESTABLISH|REGISTRATION|FOUND", text) else "2024")
+                        box.click()
+                        page.wait_for_timeout(400)
+                        for _ in range(12):
+                            cell = visible(page.get_by_text(value, exact=True))
+                            if cell is not None:
+                                cell.click()
+                                break
+                            prev = visible(page.get_by_role("button", name=re.compile(r"previous", re.I)))
+                            if prev is None:
+                                break
+                            prev.click()
+                            page.wait_for_timeout(250)
+                        if not box.input_value() and not f.get("ro"):
+                            box.fill(value)
+                    elif f.get("ro"):
+                        continue
+                    else:
+                        value = value_for(label, f.get("placeholder", ""), data)
+                        box.fill(value)
+                        box.press("Tab")
                     log(f"[extra] {label or f.get('name') or f.get('placeholder')}: {value}")
                 page.wait_for_timeout(300)
             except Exception as e:

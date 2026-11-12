@@ -377,7 +377,8 @@ def log_in(page: Page, report: RunReport) -> str:
             user = json.loads(page.evaluate("() => localStorage.getItem('user') || '{}'"))
             if not reopened and not user.get("published") and user.get("uidBhaskar") and user.get("bhaskarId"):
                 print(f"[INFO] Profile of {user['bhaskarId']} is not published yet; reopening the profile form")
-                page.goto(f"{URL}/stepfour?role={user.get('role')}&userid={user['uidBhaskar']}&bhaskarid={user['bhaskarId']}")
+                step = "stepfour/org" if str(user["bhaskarId"]).startswith("OI") else "stepfour"
+                page.goto(f"{URL}/{step}?role={user.get('role')}&userid={user['uidBhaskar']}&bhaskarid={user['bhaskarId']}")
                 reopened = True
                 continue
             bid = SF.bhaskar_id_from_page(page)
@@ -418,6 +419,7 @@ def pick_persona() -> str:
 def register_persona(page: Page, report: RunReport, persona: str, stage: str = "persona") -> None:
     t = TIMEOUT_MS / 1000
     data = SF.make_test_data(DATA["last_name"], persona)
+    data["email"], data["mobile"] = DATA["email"], DATA["mobile"]
     report.test_data = data
     print(f"[DATA] {persona}: year of birth {data['year_of_birth']}, {data['gender']}, PIN {data['pin']}, "
           f"PAN {data['pan']}, {data['org_name']}")
@@ -429,12 +431,15 @@ def register_persona(page: Page, report: RunReport, persona: str, stage: str = "
         return
     if stage == "persona":
         report.set_stage("Select entity type")
-        flow_step(page, report, "Choose Individual", lambda: SF.choose_entity(page, t))
+        entity = SF.PERSONAS[persona]["entity"]
+        flow_step(page, report, f"Choose {entity}", lambda: SF.choose_entity(page, persona, t))
         report.set_stage("Select persona")
         flow_step(page, report, f"Choose {persona}", lambda: SF.choose_persona(page, persona, t))
     report.set_stage("Basic details")
-    flow_step(page, report, "Fill basic form", lambda: SF.fill_basic_form(page, data, DATA["email"], t),
-              note=f"Year of birth {data['year_of_birth']}, {data['gender']}, India, PIN {data['pin']}, PAN {data['pan']}")
+    basic_note = (f"Year of birth {data['year_of_birth']}, {data['gender']}, India, PIN {data['pin']}, PAN {data['pan']}"
+                  if SF.PERSONAS[persona]["entity"] == SF.IND else
+                  f"{data['org_name']}, PIN {data['pin']}, entity PAN {data['org_pan']}, CIN {data['cin']}, GSTIN {data['gstin']}")
+    flow_step(page, report, "Fill basic form", lambda: SF.fill_basic_form(page, data, DATA["email"], t), note=basic_note)
     flow_step(page, report, "Preview and submit", lambda: SF.preview_and_submit(page, t))
     report.set_stage("T&C")
     flow_step(page, report, "Accept Terms & Conditions", lambda: SF.accept_terms(page, t))
@@ -469,6 +474,9 @@ def complete_profile(page: Page, report: RunReport, data: dict[str, str], person
     report.step(page, "Publish Your Profile", note=f"Published. Server: {details}", message=True)
 
 
+last_report: RunReport | None = None
+
+
 def main(persona: str | None = None, rotate: bool = True, on_page: Callable[[Page], None] | None = None) -> None:
     missing = [k for k, v in DATA.items() if not v]
     if DATA["mode"] not in ("signup", "login"):
@@ -481,8 +489,10 @@ def main(persona: str | None = None, rotate: bool = True, on_page: Callable[[Pag
     persona = persona or pick_persona()
     if persona not in SF.PERSONAS:
         raise SystemExit(f'Unknown persona "{persona}". Choose one of: {", ".join(SF.PERSONAS)}')
+    global last_report
     report = RunReport()
-    report.persona = f"{persona} (Individual)"
+    last_report = report
+    report.persona = f"{persona} ({SF.PERSONAS[persona]['entity']})"
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO_MS)
         page = browser.new_context().new_page()

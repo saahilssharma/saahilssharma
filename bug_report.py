@@ -92,6 +92,25 @@ def append(report: Path, bugs_file: Path) -> None:
     info = cast(dict[str, Any], run.get("info") or {})
     for key, value in info.items():
         kv(doc, str(key), str(value))
+    rows = cast(list[dict[str, Any]], run.get("classification") or [])
+    if rows:
+        doc.add_heading(str(run.get("classification_heading") or "Where each issue applies"), 2)
+        for line in cast(list[str], run.get("classification_notes") or []):
+            doc.add_paragraph(str(line), style="List Bullet")
+        ctable = doc.add_table(rows=1, cols=3)
+        ctable.style = "Light Grid Accent 1"
+        for cell, head in zip(ctable.rows[0].cells, ("ID", "Issue", "Applies to")):
+            cell.text = head
+        for row in rows:
+            cells = ctable.add_row().cells
+            cells[0].text, cells[1].text, cells[2].text = str(row.get("id", "")), str(row.get("title", "")), str(row.get("applies_to", ""))
+    updates = cast(list[dict[str, Any]], run.get("updates") or [])
+    if updates:
+        doc.add_heading("Updates to earlier bugs", 2)
+        for u in updates:
+            p = doc.add_paragraph(style="List Bullet")
+            p.add_run(f"{u.get('id', '')}: ").bold = True
+            p.add_run(str(u.get("text", "")))
 
     missing: list[str] = []
     for i, b in enumerate(bugs, first):
@@ -102,6 +121,10 @@ def append(report: Path, bugs_file: Path) -> None:
         r = p.add_run(b["severity"])
         r.bold, r.font.color.rgb = True, SEV[b["severity"]]
         p.add_run(f"    Type: {b['type']}    Stage: {b['stage']}")
+        if b.get("applies_to"):
+            p = doc.add_paragraph()
+            p.add_run("Applies to: ").bold = True
+            p.add_run(str(b["applies_to"]))
         doc.add_paragraph().add_run("Steps to reproduce").bold = True
         for s in b["steps"]:
             doc.add_paragraph(str(s), style="List Number")
